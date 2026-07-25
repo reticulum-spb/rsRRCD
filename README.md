@@ -442,8 +442,11 @@ It performs:
 - room registration, `+m`, and topic persistence;
 - MSG round trip;
 - a 4096-byte native Resource forwarded through the hub;
+- Resource-to-packet fallback for a legacy peer without capabilities;
 - rsRRC-client WELCOME/JOIN and large-message Resource round trip;
-- graceful daemon shutdown and restart;
+- three daemon shutdown/restart cycles while one rsRRC-client stays alive;
+- application heartbeat, reconnect, and restoration of two rooms per cycle;
+- concurrent LIST, WHO, and PING requests plus timed-out query cancellation;
 - destination identity, room mode, and topic verification after restart.
 
 The test needs permission to create/use the local shared-instance socket and

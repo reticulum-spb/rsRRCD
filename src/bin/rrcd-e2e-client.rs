@@ -118,11 +118,33 @@ async fn main() -> Result<()> {
     if received.data != resource_payload {
         bail!("forwarded Resource payload mismatch");
     }
-
     receiver.close().await?;
+
+    let legacy_identity = Identity::new();
+    let (mut legacy, _) =
+        connect_and_join_legacy(&runtime, destination, legacy_identity, "rrcd-rs-e2e-legacy")
+            .await?;
+    let legacy_payload = vec![b'L'; 1024];
+    let legacy_envelope = Envelope::resource(
+        &identity.hash,
+        Some("e2e"),
+        "notice",
+        &legacy_payload,
+        Some("utf-8"),
+    )
+    .unwrap();
+    link.send(&legacy_envelope.encode()?).await?;
+    link.send_resource(legacy_payload.clone(), false, Duration::from_secs(30))
+        .await?;
+    let legacy_text = receive_packet_text(&mut legacy, legacy_payload.len()).await?;
+    if legacy_text.as_bytes() != legacy_payload {
+        bail!("legacy packet fallback payload mismatch");
+    }
+
+    legacy.close().await?;
     link.close().await?;
     shutdown.trigger();
-    println!("E2E SETUP OK: hub={hub} room=e2e commands+packet+resource");
+    println!("E2E SETUP OK: hub={hub} room=e2e commands+packet+resource+legacy-fallback");
     Ok(())
 }
 
@@ -175,18 +197,87 @@ async fn connect_and_join(
     )
     .await?;
     link.identify().await?;
-    let mut hello = Envelope::new(T_HELLO, &identity.hash);
-    hello.set(K_NICK, Value::Text(nickname.into()));
-    link.send(&hello.encode()?).await?;
-    let welcome = receive_type(&mut link, T_WELCOME).await?;
-    let mut join = Envelope::new(T_JOIN, &identity.hash);
-    join.set(K_ROOM, Value::Text("e2e".into()));
-    link.send(&join.encode()?).await?;
-    receive_type(&mut link, T_JOINED).await?;
+    let hello = Envelope::hello(&identity.hash, Some(nickname));
+    let welcome = send_until_type(&mut link, &hello, T_WELCOME).await?;
+    let join = Envelope::join(&identity.hash, "e2e", None).unwrap();
+    send_until_type(&mut link, &join, T_JOINED).await?;
     Ok((link, welcome))
 }
 
+async fn connect_and_join_legacy(
+    runtime: &rns_runtime::reticulum::ReticulumHandle,
+    destination: [u8; 16],
+    identity: Identity,
+    nickname: &str,
+) -> Result<(LinkSession, Envelope)> {
+    let mut link = LinkSession::open(
+        runtime,
+        identity.clone(),
+        destination,
+        1,
+        Duration::from_secs(20),
+    )
+    .await?;
+    link.identify().await?;
+    let mut hello = Envelope::new(T_HELLO, &identity.hash);
+    hello.set(K_NICK, Value::Text(nickname.into()));
+    let welcome = send_until_type(&mut link, &hello, T_WELCOME).await?;
+    let join = Envelope::join(&identity.hash, "e2e", None).unwrap();
+    send_until_type(&mut link, &join, T_JOINED).await?;
+    Ok((link, welcome))
+}
+
+async fn receive_packet_text(link: &mut LinkSession, expected_bytes: usize) -> Result<String> {
+    let receive = async {
+        let mut text = String::new();
+        while text.len() < expected_bytes {
+            let payload = link.recv().await?;
+            let envelope = Envelope::decode(&payload)?;
+            match envelope.message_type() {
+                Some(T_NOTICE) => {
+                    let body = envelope.body_text().unwrap_or_default();
+                    if body.as_bytes().iter().all(|byte| *byte == b'L') {
+                        text.push_str(body);
+                    }
+                }
+                Some(T_RESOURCE_ENVELOPE) => {
+                    bail!("legacy peer unexpectedly received a Resource envelope")
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, anyhow::Error>(text)
+    };
+    tokio::time::timeout(Duration::from_secs(20), receive)
+        .await
+        .context("timed out waiting for legacy packet fallback")?
+}
+
+async fn send_until_type(
+    link: &mut LinkSession,
+    envelope: &Envelope,
+    expected: u64,
+) -> Result<Envelope> {
+    for attempt in 1..=3 {
+        link.send(&envelope.encode()?).await?;
+        match receive_type_with_timeout(link, expected, Duration::from_secs(3)).await {
+            Ok(envelope) => return Ok(envelope),
+            Err(_) if attempt < 3 => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
 async fn receive_type(link: &mut LinkSession, expected: u64) -> Result<Envelope> {
+    receive_type_with_timeout(link, expected, Duration::from_secs(20)).await
+}
+
+async fn receive_type_with_timeout(
+    link: &mut LinkSession,
+    expected: u64,
+    timeout: Duration,
+) -> Result<Envelope> {
     let receive = async {
         loop {
             let payload = link.recv().await?;
@@ -196,7 +287,7 @@ async fn receive_type(link: &mut LinkSession, expected: u64) -> Result<Envelope>
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(20), receive)
+    tokio::time::timeout(timeout, receive)
         .await
         .context("timed out waiting for hub response")?
 }
