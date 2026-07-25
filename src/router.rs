@@ -461,7 +461,16 @@ impl Router {
                 .text(K_BODY)
                 .is_some_and(|text| text.trim_start().starts_with('/'))
         {
-            return self.command(link, peer, &envelope);
+            let previous_nick = self.state.sessions[&link].nick.clone();
+            if let Some(nick) = envelope
+                .text(K_NICK)
+                .and_then(|value| normalize_nick(value, self.config.max_nick_bytes))
+            {
+                self.state.set_nick(link, Some(nick));
+            }
+            let mut actions = self.command(link, peer, &envelope);
+            actions.extend(self.nick_change_notices(link, peer, previous_nick));
+            return actions;
         }
         if message_type == T_NOTICE && envelope.get(K_DST).is_some() {
             if envelope.get(K_ROOM).is_some() {
@@ -507,9 +516,11 @@ impl Router {
             return self.error(link, Some(&room_name), "room is moderated (+m)");
         }
         let recipients: Vec<_> = room.members.iter().copied().collect();
+        let previous_nick = self.state.sessions[&link].nick.clone();
         self.authorize_envelope(link, peer, &mut envelope, Some(&room_name));
         let mut actions = Vec::new();
         self.broadcast(&mut actions, &recipients, envelope);
+        actions.extend(self.nick_change_notices(link, peer, previous_nick));
         self.count_forwarded(message_type);
         actions
     }
@@ -1415,6 +1426,34 @@ impl Router {
         let mut actions = Vec::new();
         for recipient in recipients {
             actions.extend(self.notice(recipient, Some(room_name), text));
+        }
+        actions
+    }
+
+    fn nick_change_notices(
+        &mut self,
+        link: LinkId,
+        peer: IdentityHash,
+        previous: Option<String>,
+    ) -> Vec<Action> {
+        let Some(session) = self.state.sessions.get(&link) else {
+            return Vec::new();
+        };
+        let current = session.nick.clone();
+        if current == previous {
+            return Vec::new();
+        }
+        let rooms = session.rooms.iter().cloned().collect::<Vec<_>>();
+        let previous = previous.unwrap_or_else(|| hex::encode(peer)[..12].to_string());
+        let current = current.unwrap_or_else(|| hex::encode(peer)[..12].to_string());
+        let mut actions = Vec::new();
+        for room in rooms {
+            actions.extend(
+                self.broadcast_room_notice(
+                    &room,
+                    &format!("nick changed: {previous} -> {current}"),
+                ),
+            );
         }
         actions
     }
@@ -2667,6 +2706,53 @@ mod tests {
         let response = action_envelope(&actions[0]);
         assert_eq!(response.integer(K_T), Some(T_NOTICE));
         assert_eq!(response.text(K_BODY), Some("room lobby is private"));
+    }
+
+    #[test]
+    fn nickname_change_on_command_updates_who_and_notifies_room() {
+        let mut router = Router::new(config(), [9; 16]);
+        connect(&mut router, [1; 16], [11; 16], "alice");
+        connect(&mut router, [2; 16], [22; 16], "bob");
+        join(&mut router, [1; 16], [11; 16], "lobby");
+        join(&mut router, [2; 16], [22; 16], "lobby");
+
+        let mut command = client(T_MSG, [11; 16]);
+        command.set(K_ROOM, Value::Text("lobby".into()));
+        command.set(K_BODY, Value::Text("/who lobby".into()));
+        command.set_nick("alice-new");
+        let actions = router.packet([1; 16], &command.encode().unwrap());
+
+        assert_eq!(
+            router.state.sessions[&[1; 16]].nick.as_deref(),
+            Some("alice-new")
+        );
+        let who = actions
+            .iter()
+            .map(action_envelope)
+            .find(|envelope| {
+                envelope
+                    .text(K_BODY)
+                    .is_some_and(|body| body.starts_with("members in lobby:"))
+            })
+            .unwrap();
+        assert!(
+            who.user_list()
+                .unwrap()
+                .iter()
+                .any(|user| user.nick.as_deref() == Some("alice-new"))
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .map(action_envelope)
+                .filter(|envelope| {
+                    envelope
+                        .text(K_BODY)
+                        .is_some_and(|body| body == "nick changed: alice -> alice-new")
+                })
+                .count(),
+            2
+        );
     }
 
     #[test]
