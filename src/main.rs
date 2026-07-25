@@ -1,8 +1,3 @@
-mod config;
-mod registry;
-mod router;
-mod state;
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,14 +9,12 @@ use clap::Parser;
 use rns_identity::identity::Identity;
 use rns_runtime::lifecycle::{ShutdownSignal, install_signal_handlers};
 use rns_runtime::link_session::{LinkListener, LinkListenerEvent};
-use router::{Action, Router};
+use rsrrcd::{Action, HubConfig, RoomRegistry, Router};
 use serde_cbor::Value;
 use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::config::HubConfig;
-use crate::registry::RoomRegistry;
 use rs_rrc::DEST_NAME;
 
 #[derive(Parser, Debug)]
