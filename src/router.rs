@@ -300,6 +300,12 @@ impl Router {
             Ok(v) => v,
             Err(e) => return self.error(link, None, &e.to_string()),
         };
+        if let Some(nick) = envelope
+            .text(K_NICK)
+            .and_then(|value| normalize_nick(value, self.config.max_nick_bytes))
+        {
+            self.state.set_nick(link, Some(nick));
+        }
         let session = &self.state.sessions[&link];
         if session.rooms.len() >= self.config.max_rooms_per_session
             && !session.rooms.contains(&room_name)
