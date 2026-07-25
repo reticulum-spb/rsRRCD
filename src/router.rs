@@ -267,6 +267,8 @@ impl Router {
         let mut caps = Map::new();
         caps.insert(Value::Integer(CAP_ACTION), Value::Bool(true));
         caps.insert(Value::Integer(CAP_DIRECT_NOTICE), Value::Bool(true));
+        caps.insert(Value::Integer(CAP_ROOM_STATE), Value::Bool(true));
+        caps.insert(Value::Integer(CAP_USER_LIST), Value::Bool(true));
         if self.config.enable_resource_transfer {
             caps.insert(Value::Integer(CAP_RESOURCE_ENVELOPE), Value::Bool(true));
         }
