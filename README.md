@@ -32,7 +32,9 @@ tree.
 The package also exposes the transport-independent hub core as the `rsrrcd`
 library. Test harnesses and alternate frontends can drive `Router` with
 identified Link IDs and apply the returned `Action` values without duplicating
-room, command, persistence, or protocol logic.
+room, command, persistence, or protocol logic. `Router::load` restores the
+configured room registry, while `Router::new` starts with empty in-memory
+state.
 
 ## Run
 

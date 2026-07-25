@@ -332,8 +332,7 @@ async fn main() -> Result<()> {
         shutdown.trigger();
         return Ok(());
     }
-    let mut router = Router::new(config, identity.hash);
-    router.state.rooms = RoomRegistry::load(&router.config.room_registry_path)?;
+    let mut router = Router::load(config, identity.hash)?;
     if router.config.announce_on_start {
         announce_hub(&listener, &router.config).await?;
         router.state.counters.announces += 1;

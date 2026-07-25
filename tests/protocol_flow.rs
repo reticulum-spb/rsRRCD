@@ -195,3 +195,55 @@ fn malformed_packet_is_rejected_and_claimed_source_is_replaced() {
         .unwrap();
     assert_eq!(forwarded.source(), Some([11; 16]));
 }
+
+#[test]
+fn registered_room_state_survives_public_api_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = directory.path().join("rooms");
+    let alice_link = [1; 16];
+    let alice = [11; 16];
+    let bob_link = [2; 16];
+    let bob = [22; 16];
+    let mut router = Router::load(config(registry.clone()), [9; 16]).unwrap();
+    connect(&mut router, alice_link, alice, "alice");
+    connect(&mut router, bob_link, bob, "bob");
+    for (link, peer) in [(alice_link, alice), (bob_link, bob)] {
+        send(
+            &mut router,
+            link,
+            Envelope::join(&peer, "lobby", None).unwrap(),
+        );
+    }
+
+    for text in [
+        "/register lobby",
+        "/topic lobby Persistent topic",
+        "/mode lobby +m",
+        "/mode lobby +i",
+        "/mode lobby +k secret",
+        "/op lobby bob",
+        "/voice lobby bob",
+        "/ban lobby add bob",
+    ] {
+        let actions = send(&mut router, alice_link, command(alice, "lobby", text));
+        assert!(
+            !actions.is_empty(),
+            "administrative command produced no response: {text}"
+        );
+    }
+    drop(router);
+
+    let restarted = Router::load(config(registry), [9; 16]).unwrap();
+    let room = &restarted.state.rooms["lobby"];
+    assert!(room.registered);
+    assert_eq!(room.founder, Some(alice));
+    assert_eq!(room.topic.as_deref(), Some("Persistent topic"));
+    assert_eq!(room.key.as_deref(), Some("secret"));
+    assert!(room.moderated);
+    assert!(room.invite_only);
+    assert!(room.operators.contains(&alice));
+    assert!(room.operators.contains(&bob));
+    assert!(room.voiced.contains(&bob));
+    assert!(room.banned.contains(&bob));
+    assert!(room.members.is_empty());
+}

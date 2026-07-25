@@ -65,6 +65,13 @@ impl Router {
         }
     }
 
+    pub fn load(config: HubConfig, hub_identity: IdentityHash) -> anyhow::Result<Self> {
+        let rooms = RoomRegistry::load(&config.room_registry_path)?;
+        let mut router = Self::new(config, hub_identity);
+        router.state.rooms = rooms;
+        Ok(router)
+    }
+
     pub fn established(&mut self, link: LinkId) {
         self.state.establish(link, &self.config);
     }
