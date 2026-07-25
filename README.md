@@ -252,6 +252,10 @@ to another live link.
 
 Support is advertised as `CAP_DIRECT_NOTICE = 2`.
 
+The structured room-state and WHO extensions, including their integer-key
+CBOR layout and compatibility rules, are specified in the adjacent
+[`rsRRC/EXTENSIONS.md`](../rsRRC/EXTENSIONS.md).
+
 ### Large payload transfer
 
 Large payloads use a two-step protocol:
