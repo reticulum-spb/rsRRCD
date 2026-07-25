@@ -431,6 +431,7 @@ It performs:
 - room registration, `+m`, and topic persistence;
 - MSG round trip;
 - a 4096-byte native Resource forwarded through the hub;
+- rsRRC-client WELCOME/JOIN and large-message Resource round trip;
 - graceful daemon shutdown and restart;
 - destination identity, room mode, and topic verification after restart.
 

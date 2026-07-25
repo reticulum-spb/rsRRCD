@@ -1,6 +1,4 @@
 mod config;
-mod constants;
-mod protocol;
 mod registry;
 mod router;
 mod state;
@@ -23,8 +21,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::HubConfig;
-use crate::constants::DEST_NAME;
 use crate::registry::RoomRegistry;
+use rs_rrc::DEST_NAME;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]

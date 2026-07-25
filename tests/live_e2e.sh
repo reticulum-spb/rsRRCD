@@ -9,6 +9,7 @@ HUB_LOG="${TEST_HOME}/hub.log"
 HUB_PID=""
 
 cargo build --offline --bin rrcd-rs --bin rrcd-e2e-client
+cargo build --offline --manifest-path ../rsRRC-client/Cargo.toml --example live_smoke
 RSRRCD_HOME="${TEST_HOME}" target/debug/rrcd-rs >/dev/null
 
 stop_hub() {
@@ -43,6 +44,8 @@ trap stop_hub EXIT
 start_hub
 DESTINATION="$(destination)"
 target/debug/rrcd-e2e-client "${DESTINATION}" "${RNS_CONFIG_DIR}" setup
+../rsRRC-client/target/debug/examples/live_smoke \
+    "${DESTINATION}" "${RNS_CONFIG_DIR}" "client-smoke"
 
 stop_hub
 start_hub

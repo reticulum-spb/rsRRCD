@@ -1,10 +1,3 @@
-#[allow(dead_code)]
-#[path = "../constants.rs"]
-mod constants;
-#[allow(dead_code)]
-#[path = "../protocol.rs"]
-mod protocol;
-
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -14,11 +7,9 @@ use rns_identity::identity::Identity;
 use rns_runtime::application::await_path;
 use rns_runtime::lifecycle::ShutdownSignal;
 use rns_runtime::link_client::LinkSession;
+use rs_rrc::*;
 use serde_cbor::Value;
 use sha2::{Digest, Sha256};
-
-use constants::*;
-use protocol::Envelope;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,7 +40,7 @@ async fn main() -> Result<()> {
         connect_and_join(&runtime, destination, identity.clone(), "rrcd-rs-e2e").await?;
     let hub = welcome
         .map(K_BODY)
-        .and_then(|body| protocol::map_get(body, B_WELCOME_HUB))
+        .and_then(|body| map_get(body, B_WELCOME_HUB))
         .and_then(|value| match value {
             Value::Text(value) => Some(value.as_str()),
             _ => None,
@@ -100,7 +91,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     let resource_payload = vec![b'R'; 4096];
-    let mut body = protocol::Map::new();
+    let mut body = Map::new();
     body.insert(Value::Integer(B_RES_ID), Value::Bytes(vec![0x42; 8]));
     body.insert(Value::Integer(B_RES_KIND), Value::Text("notice".into()));
     body.insert(

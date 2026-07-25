@@ -5,10 +5,28 @@ use serde_cbor::Value;
 use sha2::{Digest, Sha256};
 
 use crate::config::HubConfig;
-use crate::constants::*;
-use crate::protocol::{Envelope, Map, map_get, normalize_nick};
 use crate::registry::{RoomRegistry, now};
 use crate::state::{HubState, IdentityHash, LinkId};
+use rs_rrc::*;
+
+const COMMAND_HELP: &str = "\
+RRC commands:
+ /help
+ /list
+ /who [room] (/names)
+ /topic <room> [topic]
+ /register <room> | /unregister <room> (founder)
+Room operator:
+ /mode <room> <+m|-m|+i|-i|+t|-t|+n|-n|+p|-p>
+ /mode <room> +k <key> | -k
+ /op|/deop|/voice|/devoice <room> <nick|hash>
+ /invite|/ban <room> add|del|list [nick|hash]
+ /unban <room> <nick|hash>
+ /kick <room> <nick|hash>
+Server operator:
+ /stats
+ /reload
+ /kline add <nick|hash> | del <nick|hash> | list";
 
 #[derive(Debug)]
 pub enum Action {
@@ -327,6 +345,7 @@ impl Router {
         if !existing.is_empty() {
             let mut joined = Envelope::new(T_JOINED, &self.hub_identity);
             joined.set(K_ROOM, Value::Text(room_name.clone()));
+            joined.set_room_state(&self.room_protocol_state(&room_name));
             if let Some(nick) = nick {
                 joined.set(K_NICK, Value::Text(nick));
             }
@@ -337,6 +356,7 @@ impl Router {
         }
         let mut joined = Envelope::new(T_JOINED, &self.hub_identity);
         joined.set(K_ROOM, Value::Text(room_name.clone()));
+        joined.set_room_state(&self.room_protocol_state(&room_name));
         if self.config.include_joined_member_list {
             let members = self.state.rooms[&room_name]
                 .members
@@ -531,6 +551,7 @@ impl Router {
             .map(|value| value.to_ascii_lowercase())
             .unwrap_or_default();
         match command.as_str() {
+            "/help" => self.notice(link, None, COMMAND_HELP),
             "/stats" => {
                 if !self.config.trusted_identities.contains(&peer) {
                     return self.error(link, None, "not authorized");
@@ -640,9 +661,8 @@ impl Router {
                     state.operators.insert(peer);
                 }
                 match self.persist_rooms() {
-                    Ok(()) => self.notice(
-                        link,
-                        Some(&room_name),
+                    Ok(()) => self.broadcast_room_state_notice(
+                        &room_name,
                         if register {
                             "room registered"
                         } else {
@@ -686,15 +706,11 @@ impl Router {
                         &format!("room persist failed: {error}"),
                     );
                 }
-                let mut actions = Vec::new();
-                for recipient in recipients {
-                    actions.extend(self.notice(
-                        recipient,
-                        Some(&room_name),
-                        &format!("topic for {room_name} is now: {topic}"),
-                    ));
-                }
-                actions
+                self.room_state_notice_to(
+                    &room_name,
+                    &recipients,
+                    &format!("topic for {room_name} is now: {topic}"),
+                )
             }
             "/mode" => self.mode_command(link, peer, room, &parts),
             "/op" | "/deop" | "/voice" | "/devoice" => {
@@ -762,7 +778,7 @@ impl Router {
         }
         state.last_used_ts = now();
         match self.persist_rooms() {
-            Ok(()) => self.broadcast_room_notice(
+            Ok(()) => self.broadcast_room_state_notice(
                 &room_name,
                 &format!(
                     "mode for {room_name} is now: {}",
@@ -1325,6 +1341,43 @@ impl Router {
         }
     }
 
+    fn room_protocol_state(&self, room_name: &str) -> RoomState {
+        let room = &self.state.rooms[room_name];
+        RoomState {
+            registered: room.registered,
+            modes: self.room_mode_string(room_name),
+            topic: room.topic.clone(),
+        }
+    }
+
+    fn room_state_notice_to(
+        &mut self,
+        room_name: &str,
+        recipients: &[LinkId],
+        text: &str,
+    ) -> Vec<Action> {
+        let state = self.room_protocol_state(room_name);
+        let mut actions = Vec::new();
+        for recipient in recipients {
+            let mut envelope = Envelope::new(T_NOTICE, &self.hub_identity);
+            envelope.set(K_ROOM, Value::Text(room_name.to_string()));
+            envelope.set(K_BODY, Value::Text(text.to_string()));
+            envelope.set_room_state(&state);
+            actions.extend(self.send(*recipient, envelope));
+        }
+        actions
+    }
+
+    fn broadcast_room_state_notice(&mut self, room_name: &str, text: &str) -> Vec<Action> {
+        let recipients: Vec<_> = self
+            .state
+            .rooms
+            .get(room_name)
+            .map(|room| room.members.iter().copied().collect())
+            .unwrap_or_default();
+        self.room_state_notice_to(room_name, &recipients, text)
+    }
+
     fn broadcast_room_notice(&mut self, room_name: &str, text: &str) -> Vec<Action> {
         let recipients: Vec<_> = self
             .state
@@ -1467,9 +1520,18 @@ impl Router {
             );
             return vec![];
         }
-        if expectation.kind != "notice" {
+        let (resource_kind, message_type) = match expectation.kind.as_str() {
+            "message" | "msg" => ("message", T_MSG),
+            "notice" => ("notice", T_NOTICE),
+            "action" => ("action", T_ACTION),
+            _ => {
+                self.state.counters.resources_rejected += 1;
+                return self.error(link, expectation.room.as_deref(), "unknown resource kind");
+            }
+        };
+        if text.len() > self.config.max_resource_bytes {
             self.state.counters.resources_rejected += 1;
-            return self.error(link, expectation.room.as_deref(), "unknown resource kind");
+            return self.error(link, expectation.room.as_deref(), "resource text too large");
         }
         let Some(room_name) = expectation.room else {
             self.state.counters.resources_rejected += 1;
@@ -1490,13 +1552,13 @@ impl Router {
         };
         if !room.members.contains(&link) || !room.may_speak(&peer) || room.banned.contains(&peer) {
             self.state.counters.resources_rejected += 1;
-            return self.error(link, Some(&room_name), "resource notice is not allowed");
+            return self.error(link, Some(&room_name), "resource message is not allowed");
         }
         let recipients: Vec<_> = room
             .members
             .iter()
             .copied()
-            .filter(|recipient| *recipient != link)
+            .filter(|recipient| message_type != T_NOTICE || *recipient != link)
             .collect();
         let nick = self.state.sessions[&link].nick.clone();
         let mut actions = Vec::new();
@@ -1506,11 +1568,11 @@ impl Router {
                 peer,
                 nick.as_deref(),
                 Some(&room_name),
-                "notice",
+                resource_kind,
                 &text,
             ));
         }
-        self.count_forwarded(T_NOTICE);
+        self.count_forwarded(message_type);
         actions
     }
 
@@ -1619,15 +1681,21 @@ impl Router {
         self.smart_notice(link, room, text, "notice")
     }
 
-    fn packet_notice_from(
+    fn packet_text_from(
         &mut self,
         link: LinkId,
         source: IdentityHash,
         nick: Option<&str>,
         room: Option<&str>,
+        kind: &str,
         text: &str,
     ) -> Vec<Action> {
-        let mut env = Envelope::new(T_NOTICE, &source);
+        let message_type = match kind {
+            "message" | "msg" => T_MSG,
+            "action" => T_ACTION,
+            _ => T_NOTICE,
+        };
+        let mut env = Envelope::new(message_type, &source);
         if let Some(room) = room {
             env.set(K_ROOM, Value::Text(room.into()));
         }
@@ -1659,12 +1727,12 @@ impl Router {
     ) -> Vec<Action> {
         let payload = text.as_bytes().to_vec();
         if payload.len() <= 512 {
-            return self.packet_notice_from(link, source, nick, room, text);
+            return self.packet_text_from(link, source, nick, room, kind, text);
         }
         if !self.config.enable_resource_transfer || payload.len() > self.config.max_resource_bytes {
             let mut actions = Vec::new();
             for chunk in utf8_chunks(text, 300) {
-                actions.extend(self.packet_notice_from(link, source, nick, room, chunk));
+                actions.extend(self.packet_text_from(link, source, nick, room, kind, chunk));
             }
             return actions;
         }
@@ -1957,10 +2025,28 @@ mod tests {
             room_state.text(K_BODY),
             Some("room lobby: unregistered; mode=(none); topic=(none)")
         );
+        let joined = actions
+            .iter()
+            .map(action_envelope)
+            .find(|envelope| envelope.integer(K_T) == Some(T_JOINED))
+            .unwrap();
+        assert_eq!(
+            joined.room_state(),
+            Some(RoomState {
+                registered: false,
+                modes: "(none)".into(),
+                topic: None,
+            })
+        );
 
         let actions = slash(&mut router, [1; 16], [11; 16], "lobby", "/MODE lobby +M");
         assert!(!actions.is_empty());
         assert!(router.state.rooms["lobby"].moderated);
+        assert!(actions.iter().map(action_envelope).all(|envelope| {
+            envelope
+                .room_state()
+                .is_some_and(|state| state.modes == "+m")
+        }));
 
         let actions = slash(&mut router, [1; 16], [11; 16], "lobby", "/LiSt");
         assert_eq!(
@@ -2113,6 +2199,38 @@ mod tests {
         assert_eq!(router.state.counters.resources_sent, 1);
         assert_eq!(router.state.counters.resource_bytes_received, 1024);
         assert_eq!(router.state.counters.resource_bytes_sent, 1024);
+    }
+
+    #[test]
+    fn expected_message_resource_is_forwarded_as_message() {
+        let mut router = Router::new(config(), [9; 16]);
+        connect(&mut router, [1; 16], [11; 16], "alice");
+        connect(&mut router, [2; 16], [22; 16], "bob");
+        for (link, peer) in [([1; 16], [11; 16]), ([2; 16], [22; 16])] {
+            let mut join = client(T_JOIN, peer);
+            join.set(K_ROOM, Value::Text("lobby".into()));
+            router.packet(link, &join.encode().unwrap());
+        }
+        let payload = vec![b'x'; 400];
+        let announcement =
+            Envelope::resource(&[11; 16], Some("lobby"), "message", &payload, Some("utf-8"))
+                .unwrap();
+        assert!(
+            router
+                .packet([1; 16], &announcement.encode().unwrap())
+                .is_empty()
+        );
+
+        let actions = router.resource_received([1; 16], payload);
+        assert_eq!(actions.len(), 2);
+        assert!(actions.iter().all(|action| {
+            matches!(
+                action,
+                Action::Send(_, envelope)
+                    if Envelope::decode(envelope).unwrap().integer(K_T) == Some(T_MSG)
+            )
+        }));
+        assert_eq!(router.state.counters.messages_forwarded, 1);
     }
 
     #[test]
@@ -2462,6 +2580,42 @@ mod tests {
             response.text(K_BODY),
             Some("Registered public rooms:\n  alpha\n  zeta - Last room")
         );
+    }
+
+    #[test]
+    fn help_lists_available_commands_in_a_single_notice() {
+        let mut router = Router::new(config(), [9; 16]);
+        connect(&mut router, [1; 16], [11; 16], "alice");
+
+        let actions = slash(&mut router, [1; 16], [11; 16], "ignored", "/help");
+        assert_eq!(actions.len(), 1);
+        let response = action_envelope(&actions[0]);
+        assert_eq!(response.integer(K_T), Some(T_NOTICE));
+        assert_eq!(response.text(K_ROOM), None);
+        let help = response.text(K_BODY).unwrap();
+        for command in [
+            "/help",
+            "/list",
+            "/who",
+            "/names",
+            "/topic",
+            "/register",
+            "/unregister",
+            "/mode",
+            "/op",
+            "/deop",
+            "/voice",
+            "/devoice",
+            "/invite",
+            "/ban",
+            "/unban",
+            "/kick",
+            "/stats",
+            "/reload",
+            "/kline",
+        ] {
+            assert!(help.contains(command), "help omits {command}");
+        }
     }
 
     #[test]
