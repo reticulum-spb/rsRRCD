@@ -607,7 +607,7 @@ impl Router {
                 {
                     return self.notice(link, None, &format!("room {room_name} is private"));
                 }
-                let mut members = self
+                let mut users = self
                     .state
                     .rooms
                     .get(&room_name)
@@ -615,25 +615,46 @@ impl Router {
                     .flat_map(|found| found.members.iter())
                     .filter_map(|id| self.state.sessions.get(id))
                     .map(|s| {
-                        let identity = s.peer.map(hex::encode).unwrap_or_else(|| "?".to_string());
-                        s.nick.as_ref().map_or(identity.clone(), |nick| {
-                            format!("{nick} ({})", &identity[..identity.len().min(12)])
+                        let peer = s.peer?;
+                        let identity = hex::encode(peer);
+                        let room = &self.state.rooms[&room_name];
+                        Some(UserInfo {
+                            nick: s.nick.clone(),
+                            identity,
+                            operator: room.operators.contains(&peer),
+                            voiced: room.voiced.contains(&peer),
+                        })
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                users.sort_by(|left, right| {
+                    left.nick
+                        .as_deref()
+                        .unwrap_or(&left.identity)
+                        .cmp(right.nick.as_deref().unwrap_or(&right.identity))
+                });
+                let members = users
+                    .iter()
+                    .map(|user| {
+                        user.nick.as_ref().map_or(user.identity.clone(), |nick| {
+                            format!("{nick} ({})", &user.identity[..12])
                         })
                     })
                     .collect::<Vec<_>>();
-                members.sort();
-                self.notice(
-                    link,
-                    None,
-                    &format!(
+                let mut response = Envelope::new(T_NOTICE, &self.hub_identity);
+                response.set(
+                    K_BODY,
+                    Value::Text(format!(
                         "members in {room_name}: {}",
                         if members.is_empty() {
                             "(none)".into()
                         } else {
                             members.join(", ")
                         }
-                    ),
-                )
+                    )),
+                );
+                response.set_user_list(&users);
+                self.send(link, response)
             }
             "/register" | "/unregister" => {
                 let register = command == "/register";
