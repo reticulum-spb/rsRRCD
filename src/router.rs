@@ -1815,7 +1815,10 @@ impl Router {
         if payload.len() <= 512 {
             return self.packet_text_from(link, source, nick, room, kind, text);
         }
-        if !self.config.enable_resource_transfer || payload.len() > self.config.max_resource_bytes {
+        if !self.config.enable_resource_transfer
+            || !self.peer_supports(link, CAP_RESOURCE_ENVELOPE)
+            || payload.len() > self.config.max_resource_bytes
+        {
             let mut actions = Vec::new();
             for chunk in utf8_chunks(text, 300) {
                 actions.extend(self.packet_text_from(link, source, nick, room, kind, chunk));
@@ -2379,7 +2382,7 @@ mod tests {
         let mut router = Router::new(cfg, [9; 16]);
         router.established([1; 16]);
         router.identified([1; 16], [11; 16]);
-        let hello = client(T_HELLO, [11; 16]);
+        let hello = Envelope::hello(&[11; 16], None);
         let actions = router.packet([1; 16], &hello.encode().unwrap());
         assert!(matches!(
             actions.as_slice(),
@@ -2417,6 +2420,31 @@ mod tests {
             .collect();
         assert!(chunks.iter().all(|chunk| chunk.len() <= 300));
         assert_eq!(chunks.concat(), "🙂".repeat(300));
+    }
+
+    #[test]
+    fn large_notice_falls_back_when_peer_does_not_support_resources() {
+        let mut cfg = config();
+        cfg.greeting = Some("x".repeat(1024));
+        let mut router = Router::new(cfg, [9; 16]);
+        router.established([1; 16]);
+        router.identified([1; 16], [11; 16]);
+        let hello = client(T_HELLO, [11; 16]);
+        let actions = router.packet([1; 16], &hello.encode().unwrap());
+
+        assert!(actions.len() > 2);
+        assert!(
+            actions
+                .iter()
+                .all(|action| !matches!(action, Action::SendResource(_, _)))
+        );
+        let text = actions
+            .iter()
+            .skip(1)
+            .map(action_envelope)
+            .filter_map(|envelope| envelope.text(K_BODY).map(str::to_string))
+            .collect::<String>();
+        assert_eq!(text, "x".repeat(1024));
     }
 
     #[test]
