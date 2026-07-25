@@ -351,20 +351,26 @@ impl Router {
         let nick = self.state.sessions[&link].nick.clone();
         let mut actions = Vec::new();
         if !existing.is_empty() {
-            let mut joined = Envelope::new(T_JOINED, &self.hub_identity);
-            joined.set(K_ROOM, Value::Text(room_name.clone()));
-            joined.set_room_state(&self.room_protocol_state(&room_name));
-            if let Some(nick) = nick {
-                joined.set(K_NICK, Value::Text(nick));
+            for recipient in existing {
+                let mut joined = Envelope::new(T_JOINED, &self.hub_identity);
+                joined.set(K_ROOM, Value::Text(room_name.clone()));
+                if self.peer_supports(recipient, CAP_ROOM_STATE) {
+                    joined.set_room_state(&self.room_protocol_state(&room_name));
+                }
+                if let Some(nick) = nick.as_ref() {
+                    joined.set(K_NICK, Value::Text(nick.clone()));
+                }
+                if self.config.include_joined_member_list {
+                    joined.set(K_BODY, Value::Array(vec![Value::Bytes(peer.to_vec())]));
+                }
+                actions.extend(self.send(recipient, joined));
             }
-            if self.config.include_joined_member_list {
-                joined.set(K_BODY, Value::Array(vec![Value::Bytes(peer.to_vec())]));
-            }
-            self.broadcast(&mut actions, &existing, joined);
         }
         let mut joined = Envelope::new(T_JOINED, &self.hub_identity);
         joined.set(K_ROOM, Value::Text(room_name.clone()));
-        joined.set_room_state(&self.room_protocol_state(&room_name));
+        if self.peer_supports(link, CAP_ROOM_STATE) {
+            joined.set_room_state(&self.room_protocol_state(&room_name));
+        }
         if self.config.include_joined_member_list {
             let members = self.state.rooms[&room_name]
                 .members
@@ -633,7 +639,7 @@ impl Router {
                     .into_iter()
                     .flat_map(|found| found.members.iter())
                     .filter_map(|id| self.state.sessions.get(id))
-                    .map(|s| {
+                    .filter_map(|s| {
                         let peer = s.peer?;
                         let identity = hex::encode(peer);
                         let room = &self.state.rooms[&room_name];
@@ -644,7 +650,6 @@ impl Router {
                             voiced: room.voiced.contains(&peer),
                         })
                     })
-                    .flatten()
                     .collect::<Vec<_>>();
                 users.sort_by(|left, right| {
                     left.nick
@@ -672,7 +677,9 @@ impl Router {
                         }
                     )),
                 );
-                response.set_user_list(&users);
+                if self.peer_supports(link, CAP_USER_LIST) {
+                    response.set_user_list(&users);
+                }
                 self.send(link, response)
             }
             "/register" | "/unregister" => {
@@ -1402,10 +1409,21 @@ impl Router {
             let mut envelope = Envelope::new(T_NOTICE, &self.hub_identity);
             envelope.set(K_ROOM, Value::Text(room_name.to_string()));
             envelope.set(K_BODY, Value::Text(text.to_string()));
-            envelope.set_room_state(&state);
+            if self.peer_supports(*recipient, CAP_ROOM_STATE) {
+                envelope.set_room_state(&state);
+            }
             actions.extend(self.send(*recipient, envelope));
         }
         actions
+    }
+
+    fn peer_supports(&self, link: LinkId, capability: i128) -> bool {
+        self.state
+            .sessions
+            .get(&link)
+            .and_then(|session| session.peer_caps.get(&capability))
+            .copied()
+            .unwrap_or(false)
     }
 
     fn broadcast_room_state_notice(&mut self, room_name: &str, text: &str) -> Vec<Action> {
@@ -1991,6 +2009,13 @@ mod tests {
     fn connect(router: &mut Router, link: LinkId, peer: IdentityHash, nick: &str) {
         router.established(link);
         router.identified(link, peer);
+        let hello = Envelope::hello(&peer, Some(nick));
+        assert!(!router.packet(link, &hello.encode().unwrap()).is_empty());
+    }
+
+    fn connect_legacy(router: &mut Router, link: LinkId, peer: IdentityHash, nick: &str) {
+        router.established(link);
+        router.identified(link, peer);
         let mut hello = client(T_HELLO, peer);
         hello.set(K_NICK, Value::Text(nick.into()));
         assert!(!router.packet(link, &hello.encode().unwrap()).is_empty());
@@ -2121,6 +2146,52 @@ mod tests {
             action_envelope(&actions[0]).text(K_BODY),
             Some("No public rooms registered")
         );
+    }
+
+    #[test]
+    fn structured_extensions_are_only_sent_to_capable_peers() {
+        let mut router = Router::new(config(), [9; 16]);
+        connect_legacy(&mut router, [1; 16], [11; 16], "legacy");
+
+        let mut join_request = client(T_JOIN, [11; 16]);
+        join_request.set(K_ROOM, Value::Text("lobby".into()));
+        let actions = router.packet([1; 16], &join_request.encode().unwrap());
+        let joined = actions
+            .iter()
+            .map(action_envelope)
+            .find(|envelope| envelope.integer(K_T) == Some(T_JOINED))
+            .unwrap();
+        assert_eq!(joined.room_state(), None);
+
+        let actions = slash(&mut router, [1; 16], [11; 16], "lobby", "/who lobby");
+        let who = actions
+            .iter()
+            .map(action_envelope)
+            .find(|envelope| {
+                envelope
+                    .text(K_BODY)
+                    .is_some_and(|body| body.starts_with("members in lobby:"))
+            })
+            .unwrap();
+        assert_eq!(who.user_list(), None);
+        assert!(who.text(K_BODY).unwrap().contains("legacy"));
+
+        connect(&mut router, [2; 16], [22; 16], "modern");
+        let mut join_request = client(T_JOIN, [22; 16]);
+        join_request.set(K_ROOM, Value::Text("lobby".into()));
+        let actions = router.packet([2; 16], &join_request.encode().unwrap());
+        let joined_for = |recipient| {
+            actions.iter().find_map(|action| {
+                let Action::Send(target, payload) = action else {
+                    return None;
+                };
+                let envelope = Envelope::decode(payload).unwrap();
+                (*target == recipient && envelope.integer(K_T) == Some(T_JOINED))
+                    .then_some(envelope)
+            })
+        };
+        assert_eq!(joined_for([1; 16]).unwrap().room_state(), None);
+        assert!(joined_for([2; 16]).unwrap().room_state().is_some());
     }
 
     #[test]
