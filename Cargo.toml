@@ -1,0 +1,29 @@
+[package]
+name = "rsrrcd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Reticulum Relay Chat hub daemon implemented with rsReticulum"
+
+[[bin]]
+name = "rrcd-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_cbor = "0.11"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+rns-identity = { path = "../rsReticulum/crates/rns-identity" }
+rns-runtime = { path = "../rsReticulum/crates/rns-runtime" }
+
+[dev-dependencies]
+tempfile = "3"
