@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         bail!("unknown E2E mode {mode:?}; expected setup or verify");
     }
 
-    send_command(&mut link, &identity, "/register e2e", "room registered").await?;
+    send_command(&mut link, &identity, "/register e2e", "registered").await?;
     send_command(&mut link, &identity, "/mode e2e +m", "+m").await?;
     send_command(
         &mut link,

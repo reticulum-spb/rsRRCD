@@ -27,6 +27,7 @@ Server operator:
  /stats
  /reload
  /kline add <nick|hash> | del <nick|hash> | list";
+const MAX_PACKET_TEXT_BYTES: usize = 300;
 
 #[derive(Debug)]
 pub enum Action {
@@ -1819,7 +1820,7 @@ impl Router {
         text: &str,
     ) -> Vec<Action> {
         let payload = text.as_bytes().to_vec();
-        if payload.len() <= 512 {
+        if payload.len() <= MAX_PACKET_TEXT_BYTES {
             return self.packet_text_from(link, source, nick, room, kind, text);
         }
         if !self.config.enable_resource_transfer
@@ -2371,12 +2372,16 @@ mod tests {
         );
 
         let actions = router.resource_received([1; 16], payload);
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 4);
         assert!(actions.iter().all(|action| {
             matches!(
                 action,
                 Action::Send(_, envelope)
-                    if Envelope::decode(envelope).unwrap().integer(K_T) == Some(T_MSG)
+                    if Envelope::decode(envelope).unwrap().integer(K_T)
+                        == Some(T_RESOURCE_ENVELOPE)
+            ) || matches!(
+                action,
+                Action::SendResource(_, resource) if resource.len() == 400
             )
         }));
         assert_eq!(router.state.counters.messages_forwarded, 1);
@@ -2762,11 +2767,16 @@ mod tests {
         connect(&mut router, [1; 16], [11; 16], "alice");
 
         let actions = slash(&mut router, [1; 16], [11; 16], "ignored", "/help");
-        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.len(), 2);
         let response = action_envelope(&actions[0]);
-        assert_eq!(response.integer(K_T), Some(T_NOTICE));
+        assert_eq!(response.integer(K_T), Some(T_RESOURCE_ENVELOPE));
         assert_eq!(response.text(K_ROOM), None);
-        let help = response.text(K_BODY).unwrap();
+        let help = match &actions[1] {
+            Action::SendResource(_, payload) => {
+                std::str::from_utf8(payload).expect("UTF-8 help resource")
+            }
+            _ => panic!("help must use an explicit RRC resource"),
+        };
         for command in [
             "/help",
             "/list",
