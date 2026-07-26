@@ -9,6 +9,11 @@ of the Python implementation in [rrcd](../rrcd).
 - Application and room configuration: rsReticulum
   `rns_runtime::config::Config` (ConfigObj/INI format)
 
+The wire protocol is shared with the adjacent `rsRRC` crate. The reusable
+`rsRRC-client` library and the `rsNomadNet` web client are first-class Rust
+clients; compatibility is also tested against the Python daemon and NomadNet
+behavior.
+
 ## Build and test
 
 From the `rsRRCD/` directory:
@@ -448,6 +453,11 @@ It performs:
 - application heartbeat, reconnect, and restoration of two rooms per cycle;
 - concurrent LIST, WHO, and PING requests plus timed-out query cancellation;
 - destination identity, room mode, and topic verification after restart.
+
+The same client stack is used by rsNomadNet for multi-hub room chat. In that
+UI, connected hubs live under the RRC navigation tree, room/member discovery
+uses LIST and WHO, and 30-second discovery timeouts do not block messages or
+other hub events.
 
 The test needs permission to create/use the local shared-instance socket and
 the interfaces configured in rsReticulum. Link establishment may occasionally
