@@ -81,6 +81,7 @@ impl Router {
         if self.config.banned_identities.contains(&peer) {
             return vec![Action::Close(link)];
         }
+        self.state.establish(link, &self.config);
         self.state.identify(link, peer);
         vec![]
     }
@@ -2022,6 +2023,23 @@ mod tests {
         router.identified(link, peer);
         let hello = Envelope::hello(&peer, Some(nick));
         assert!(!router.packet(link, &hello.encode().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn accepts_identification_before_established_event() {
+        let mut router = Router::new(config(), [9; 16]);
+        let link = [1; 16];
+        let peer = [2; 16];
+
+        router.identified(link, peer);
+        router.established(link);
+
+        let hello = Envelope::hello(&peer, Some("python"));
+        let actions = router.packet(link, &hello.encode().unwrap());
+        assert!(!actions.is_empty());
+        let session = router.state.sessions.get(&link).unwrap();
+        assert_eq!(session.peer, Some(peer));
+        assert!(session.welcomed);
     }
 
     fn connect_legacy(router: &mut Router, link: LinkId, peer: IdentityHash, nick: &str) {

@@ -140,7 +140,8 @@ impl Default for HubState {
 impl HubState {
     pub fn establish(&mut self, link: LinkId, config: &HubConfig) {
         self.sessions
-            .insert(link, Session::new(config.rate_limit_msgs_per_minute));
+            .entry(link)
+            .or_insert_with(|| Session::new(config.rate_limit_msgs_per_minute));
     }
 
     pub fn identify(&mut self, link: LinkId, peer: IdentityHash) {
